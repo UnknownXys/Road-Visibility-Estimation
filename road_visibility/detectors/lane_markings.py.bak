@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+
+import cv2
+import numpy as np
+
+from ..types import BoundingBox, LaneSegment
+from ..utils import polygon_from_vanish_point
+from .base import BaseLaneDetector
+
+
+@dataclass
+class LaneDashDetector(BaseLaneDetector):
+    """ROI-guided lane dash detector using photometric and contour heuristics."""
+
+    def detect(
+        self,
+        frame: np.ndarray,
+        vanish_point_row: float,
+        roi_mask: Optional[np.ndarray] = None,
+    ) -> List[LaneSegment]:
+        height, width = frame.shape[:2]
+        vanish_point_row = float(vanish_point_row)
+
+        if roi_mask is None:
+            roi_mask = self._build_roi_mask(height, width, vanish_point_row)
+        if roi_mask is None or not np.any(roi_mask):
+            return []
+
+        combined_mask = self._compute_lane_mask(frame)
+        combined_mask = cv2.bitwise_and(combined_mask, roi_mask)
+        refined = self._refine_mask(combined_mask)
+
+        contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        segments: List[LaneSegment] = []
+        vanish_limit = max(0, int(vanish_point_row) - self.config.lane_roi_margin_px)
+        min_x_ratio = self.config.lane_column_min_ratio * width
+        max_x_ratio = self.config.lane_column_max_ratio * width
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.config.lane_min_area_px or area > self.config.lane_max_area_px:
+                continue
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            if y + h_box <= vanish_limit:
+                continue
+            if h_box < self.config.lane_min_length_px or h_box > self.config.lane_max_length_px:
+                continue
+            aspect = w_box / float(max(h_box, 1))
+            if aspect > self.config.lane_max_aspect_ratio:
+                continue
+            center_x = x + w_box * 0.5
+            if not (min_x_ratio * width <= center_x <= max_x_ratio * width):
+                continue
+
+            top_y = y
+            bottom_y = y + h_box
+            contour_line = np.array([[center_x, top_y], [center_x, bottom_y]], dtype=np.float32)
+            box = BoundingBox(x, y, w_box, h_box, confidence=1.0, label="lane_dash")
+            segments.append(
+                LaneSegment(contour=contour_line.astype(np.int32), bounding_box=box, length_px=float(h_box))
+            )
+
+        segments.sort(key=lambda seg: seg.bounding_box.bottom())
+        return segments
+
+    def _compute_lane_mask(self, frame: np.ndarray) -> np.ndarray:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower = (0, 0, self.config.lane_min_brightness)
+        upper = (180, self.config.lane_max_saturation, 255)
+        bright = cv2.inRange(hsv, lower, upper)
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        kernel_size = max(3, self.config.lane_tophat_kernel | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        tophat = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, kernel)
+        _, tophat_mask = cv2.threshold(tophat, self.config.lane_tophat_threshold, 255, cv2.THRESH_BINARY)
+
+        combined = cv2.bitwise_and(bright, tophat_mask)
+        return combined
+
+    def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
+        vert_kernel_size = max(3, self.config.lane_vertical_kernel | 1)
+        kernel_vert = cv2.getStructuringElement(cv2.MORPH_RECT, (3, vert_kernel_size))
+        refined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_vert, iterations=1)
+        refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, kernel_vert, iterations=1)
+        refined = cv2.dilate(refined, kernel_vert, iterations=1)
+        return refined
+
+    def _build_roi_mask(self, height: int, width: int, vanish_point_row: float) -> np.ndarray:
+        polygon = polygon_from_vanish_point(
+            width=width,
+            height=height,
+            vanish_point_row=vanish_point_row,
+            top_ratio=self.config.roi_top_ratio,
+            bottom_ratio=self.config.roi_bottom_ratio,
+            expand_px=self.config.roi_expand,
+        )
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.array(polygon, dtype=np.int32), 255)
+        return mask

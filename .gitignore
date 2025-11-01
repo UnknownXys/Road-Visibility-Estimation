@@ -1,0 +1,71 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+.conda/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.pytype/
+.pyre/
+
+# Editor settings
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Project-specific generated data
+baseline_debug/
+cameras/
+checkpoints/
+clear_refs/
+debug_test/
+debug_visibility/
+debug_vis_lines/
+results/
+tuned_debug/
+road_visibility.egg-info/
+docs/
+
+# Large media outputs written to repo root
+/*.png
+/*.jpg
+/*.jpeg
+/*.bmp
+/*.tif
+/*.tiff
+/*.mp4
+/*.avi
+/*.mov
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+.ipynb_checkpoints/

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "road-visibility"
+version = "0.1.0"
+description = "Python toolkit for road visibility estimation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+]
+
+[project.optional-dependencies]
+yolo = [
+    "ultralytics>=8.0",
+]
+
+[tool.setuptools]
+packages = ["road_visibility"]
