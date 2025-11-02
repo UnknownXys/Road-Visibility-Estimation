@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Iterable, Tuple
+from dataclasses import dataclass
+from typing import Tuple
 
 
 @dataclass
@@ -17,35 +17,19 @@ class PipelineConfig:
     frame_reference_height: int = 288
     frame_target_width: int = 352
     frame_target_height: int = 288
-    lane_min_length_px: int = 20
-    lane_max_length_px: int = 160
-    lane_max_aspect_ratio: float = 0.55  # width / height upper bound
     lane_min_brightness: int = 175
-    lane_max_saturation: int = 80
     lane_roi_margin_px: int = 30
-    lane_history_size: int = 120
-    lane_merge_tolerance_px: int = 12
-    lambda_history_size: int = 5000
     lambda_trim_fraction: float = 0.15
-    lambda_lock_alpha: float = 0.1
-    lambda_recompute_tolerance: float = 0.15
-    lambda_relock_frames: int = 120
-    lambda_lane_smoothing_alpha: float = 0.2
-    lambda_vehicle_weight_growth: float = 0.05
-    lambda_vehicle_weight_max: float = 0.4
-    lambda_vehicle_history_size: int = 40
-    lambda_min_ratio: float = 0.2
-    lambda_max_ratio: float = 2.5
+    lambda_vehicle_update_alpha: float = 0.2
+    lambda_vehicle_max_deviation: float = 0.3
     vanish_lock_alpha: float = 0.1
     vanish_tolerance_px: float = 30.0
     vanish_relock_frames: int = 60
     lane_min_area_px: int = 120
     lane_max_area_px: int = 8000
-    lane_min_angle_deg: float = 20.0
     lane_column_min_ratio: float = 0.15
     lane_column_max_ratio: float = 0.85
     lane_tophat_kernel: int = 9
-    lane_tophat_threshold: int = 20
     lane_vertical_kernel: int = 15
     lane_segment_min_len_px: float = 12.0
     lane_segment_max_len_px: float = 300.0
@@ -71,16 +55,11 @@ class PipelineConfig:
     lane_hough_threshold: int = 30
     lane_hough_min_length: int = 14
     lane_hough_max_gap: int = 6
-    boundary_canny_low: int = 50
-    boundary_canny_high: int = 150
-    boundary_hough_threshold: int = 120
     boundary_min_line_length: int = 150
-    boundary_max_line_gap: int = 30
     boundary_angle_epsilon: float = 5.0
     boundary_min_separation_px: float = 50.0
     boundary_left_min_vertical_angle: float = 10.0
     boundary_right_max_vertical_angle: float = 60.0
-    boundary_min_bottom_ratio: float = 0.38
     boundary_outlier_scale: float = 2.5
     boundary_weight_bottom_bias: float = 20.0
     boundary_length_weight_gamma: float = 1.5
@@ -96,31 +75,40 @@ class PipelineConfig:
     edge_required_stable: int = 5
     edge_min_reference_edges: int = 40
     edge_retention_threshold: float = 0.32
+    edge_visibility_min_delta_rows: float = 25.0
     vis_compare_roi_expand_ratio: float = 0.08
     background_alpha: float = 1.0 / 30.0
-    background_reset_period: int = 30
     queue_size: int = 60
-    vanish_point_recalc_period: int = 2000
     vanish_point_offset_limit: int = 150
-    reference_dir: str = "./cameras"
     default_lambda: float = 20000.0
-    default_visibility_when_empty: float = 234.0
+    visibility_compare_max_distance: float = 1200.0
     roi_bottom_ratio: float = 0.98
     roi_top_ratio: float = 0.35
     roi_expand: int = 15
-    vehicle_detector_names: Iterable[str] = field(default_factory=list)
-    segmentation_threshold: float = 0.5
-    segmentation_min_area_px: int = 60
-    segmentation_morph_kernel: int = 5
     transmittance_hist_bins: int = 32
     clear_scene_transmittance_threshold: float = 0.65
     clear_scene_min_gap_seconds: float = 5.0
     clear_scene_save_dir: str = "./clear_scenes"
     transmittance_gaussian_sigma: float = 1.5
     transmittance_hist_smoothing: int = 3
-    transmittance_dcp_radius: int = 7
+    transmittance_dcp_radius: int = 5
     transmittance_dcp_omega: float = 0.95
-    transmittance_row_threshold_scale: float = 0.5
+    transmittance_gamma: float = 1.0
+    transmittance_contrast_low: float = 0.05
+    transmittance_contrast_high: float = 0.995
+    transmittance_contrast_blend: float = 0.3
+    transmittance_atmosphere_top_percent: float = 0.001
+    visibility_compare_weight: float = 0.7
+    visibility_trans_weight: float = 0.3
+    visibility_fusion_alpha_compare: float = 1.0
+    visibility_fusion_alpha_trans: float = 1.0
+    visibility_fusion_alpha_final: float = 1.0
+    visibility_min_distance: float = 30.0
+    vehicle_upper_bound_window: int = 60
+    vehicle_upper_bound_relax: float = 1.02
+    transmittance_row_base_fraction: float = 0.12
+    transmittance_row_threshold_blend: float = 0.9
+    transmittance_row_threshold_scale: float = 0.6
     transmittance_visibility_percentile: float = 0.95
     transmittance_visibility_min_pixels: int = 500
     transmittance_video_window: int = 60

@@ -56,6 +56,13 @@ def ensure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _fmt_optional(value: Optional[float], digits: int = 3) -> str:
+    if value is None:
+        return ""
+    format_spec = f"{{:.{digits}f}}"
+    return format_spec.format(value)
+
+
 def export_visibility_series(
     estimator: RoadVisibilityEstimator,
     video_path: Path,
@@ -124,6 +131,7 @@ def write_csv(output_file: Path, series: Iterable[FrameVisibility]) -> None:
                 "timestamp_sec",
                 "visibility_compare_m",
                 "visibility_detect_m",
+                "visibility_fused_m",
                 "lambda_fused",
                 "vanish_x",
                 "vanish_y",
@@ -136,7 +144,8 @@ def write_csv(output_file: Path, series: Iterable[FrameVisibility]) -> None:
                     record.frame_index,
                     f"{record.timestamp:.3f}",
                     f"{est.visibility_compare:.3f}",
-                    f"{est.visibility_detect:.3f}",
+                    _fmt_optional(est.visibility_detect),
+                    _fmt_optional(est.visibility_fused),
                     f"{est.lambda_fused:.2f}",
                     f"{est.vanish_point_col:.2f}",
                     f"{est.vanish_point_row:.2f}",

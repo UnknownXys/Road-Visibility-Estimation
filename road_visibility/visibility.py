@@ -10,8 +10,7 @@ import numpy as np
 from .background import BackgroundEdgeModel
 from .camera_model import distance_from_row, lambda_from_segment
 from .config import PipelineConfig
-from .detectors import BaseLaneDetector, BaseVehicleDetector, HybridLaneDetector, LaneBoundaryDetector
-from .detectors.lane_segmentation import BaseLaneSegmentationModel
+from .detectors import BaseVehicleDetector, LaneBoundaryDetector, LaneDashDetector
 from .types import BoundingBox, LaneSegment, VisibilityEstimate
 from .utils import clamp, count_edges, dilate_erode, ensure_directory, polygon_from_vanish_point, trim_mean
 
@@ -19,8 +18,6 @@ from .utils import clamp, count_edges, dilate_erode, ensure_directory, polygon_f
 @dataclass
 class RoadVisibilityEstimator:
     config: PipelineConfig
-    lane_detector: Optional[BaseLaneDetector] = None
-    lane_segmentation_model: Optional[BaseLaneSegmentationModel] = None
     vehicle_detectors: Optional[List[BaseVehicleDetector]] = None
 
     def __post_init__(self) -> None:
@@ -30,36 +27,40 @@ class RoadVisibilityEstimator:
             self.vehicle_detectors = [self.vehicle_detectors]
 
         self.boundary_detector = LaneBoundaryDetector(self.config)
-        if self.lane_detector is None:
-            self.lane_detector = HybridLaneDetector(
-                config=self.config,
-                segmentation_model=self.lane_segmentation_model,
-            )
+        self.lane_detector = LaneDashDetector(self.config)
         self.background = BackgroundEdgeModel(self.config)
         self.vehicle_upboard_history: deque[float] = deque(maxlen=self.config.vehicle_history_size)
-        self.vehicle_lambda_history: deque[float] = deque(maxlen=self.config.lambda_vehicle_history_size)
-        self.queue_detect: deque[float] = deque(maxlen=self.config.queue_size)
         self.queue_compare: deque[float] = deque(maxlen=self.config.queue_size)
         self.frame_counter: int = 0
         self.locked_vanish_point: Optional[Tuple[float, float]] = None
         self.vanish_outlier_count: int = 0
         self.reference_clear_frame: Optional[np.ndarray] = None
         self.reference_dark_channel: Optional[np.ndarray] = None
+        self.reference_transmittance_mean: Optional[float] = None
         self.locked_lambda: Optional[float] = None
         self.lambda_outlier_count: int = 0
         self.last_lambda_candidate: Optional[float] = None
         self.vehicle_column_history: Optional[np.ndarray] = None
         self.last_vehicle_visibility: Optional[float] = None
         self.reference_lambda: Optional[float] = None
-        self.lane_lambda_smooth: Optional[float] = None
+        self.reference_lambda_base: Optional[float] = None
         self._cached_vehicle_boxes: List[BoundingBox] = []
         self.last_trans_row: Optional[float] = None
+        self.last_compare_row: Optional[float] = None
         self.use_transmittance_video_fusion: bool = False
         self._trans_fusion_buffer: deque[np.ndarray] = deque(
             maxlen=max(self.config.transmittance_video_window, 1)
         )
         self._trans_fusion_frame: Optional[np.ndarray] = None
         self._suppress_fusion_update: bool = False
+        self.smoothed_compare: Optional[float] = None
+        self.smoothed_trans: Optional[float] = None
+        self.fused_visibility: Optional[float] = None
+        self.vehicle_upper_bound: Optional[float] = None
+        self.vehicle_upper_bound_missing: int = 0
+        self.vehicle_detect_history: deque[float] = deque(
+            maxlen=max(int(self.config.vehicle_upper_bound_window), 1)
+        )
 
     def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
         target_w = max(int(self.config.frame_target_width), 0)
@@ -76,12 +77,10 @@ class RoadVisibilityEstimator:
         clear_frame = self._resize_frame(clear_frame)
         self.frame_counter = 0
         self.vehicle_upboard_history.clear()
-        self.queue_detect.clear()
         self.queue_compare.clear()
         self.background = BackgroundEdgeModel(self.config)
         self.vehicle_column_history = None
         self._cached_vehicle_boxes = []
-        self.vehicle_lambda_history.clear()
         self._trans_fusion_buffer.clear()
         self._trans_fusion_frame = None
         approx_row = clear_frame.shape[0] * self.config.roi_top_ratio
@@ -98,16 +97,27 @@ class RoadVisibilityEstimator:
         self.last_lambda_candidate = None
         self.reference_clear_frame = clear_frame.copy()
         clear_float = clear_frame.astype(np.float32)
-        self.reference_dark_channel = np.maximum(self._dark_channel(clear_float), 1.0)
+        dark_clear = self._dark_channel(clear_float)
+        self.reference_dark_channel = np.maximum(dark_clear, 1.0)
+        self.reference_transmittance_mean = None
         self.last_vehicle_visibility = None
         self.reference_lambda = None
-        self.lane_lambda_smooth = None
+        self.reference_lambda_base = None
         self.last_trans_row = None
+        self.smoothed_compare = None
+        self.smoothed_trans = None
+        self.fused_visibility = None
+        self.vehicle_upper_bound = None
+        self.vehicle_upper_bound_missing = 0
+        self.vehicle_detect_history.clear()
 
         self._suppress_fusion_update = True
         visibility = self.estimate(clear_frame, vehicle_boxes=vehicle_boxes)
+        if visibility.mean_transmittance is not None:
+            self.reference_transmittance_mean = visibility.mean_transmittance
+        else:
+            self.reference_transmittance_mean = None
         self._suppress_fusion_update = False
-        ensure_directory(self.config.reference_dir)
         return visibility
 
     def warmup(
@@ -165,7 +175,6 @@ class RoadVisibilityEstimator:
         )
         vanish_point_col = clamp(vp_x, 0, frame.shape[1] - 1)
         roi_mask = self._expand_roi_with_vehicle_history(roi_mask, vanish_point_row, frame.shape[:2])
-
         edges = cv2.Canny(frame, *self.config.canny_thresholds)
         detection_interval = max(1, self.config.vehicle_detection_interval)
         if vehicle_boxes is None:
@@ -235,13 +244,14 @@ class RoadVisibilityEstimator:
         lambda_fused = self._fuse_lambda(lambda_lane, lambda_vehicle)
 
         visibility_detect = self._visibility_from_vehicles(lambda_fused, vehicle_boxes, vanish_point_row)
-        visibility_compare, roi_mask = self._visibility_from_edges(
+        visibility_compare, _ = self._visibility_from_edges(
             frame,
             edges,
             lambda_fused,
             vanish_point_row,
             roi_mask,
         )
+        # cv2.imwrite("1_mask.png",roi_mask)
         mean_transmittance: Optional[float] = None
         trans_hist: Optional[np.ndarray] = None
         trans_bins: Optional[np.ndarray] = None
@@ -261,6 +271,12 @@ class RoadVisibilityEstimator:
                 lambda_fused,
             )
 
+        visibility_fused = self._compute_fused_visibility(
+            visibility_compare,
+            visibility_trans,
+            visibility_detect,
+        )
+
         estimate = VisibilityEstimate(
             vanish_point_row=vanish_point_row,
             vanish_point_col=vanish_point_col,
@@ -277,6 +293,7 @@ class RoadVisibilityEstimator:
             transmittance_bins=trans_bins,
             visibility_transmittance=visibility_trans,
             transmittance_percentile_value=trans_percentile,
+            visibility_fused=visibility_fused,
         )
 
         return estimate
@@ -296,9 +313,19 @@ class RoadVisibilityEstimator:
         if self.use_transmittance_video_fusion and self._trans_fusion_frame is not None:
             frame_for_trans = self._trans_fusion_frame
         trans_map = self._compute_transmittance_map(frame_for_trans)
+        if (
+            self.reference_transmittance_mean is not None
+            and self.reference_transmittance_mean > 1e-6
+        ):
+            scale = float(self.reference_transmittance_mean)
+            trans_map = np.clip(trans_map / scale, 0.0, 1.0).astype(np.float32)
 
         if roi_mask is not None and roi_mask.shape == trans_map.shape:
-            mask_bool = roi_mask.astype(bool)
+            if roi_mask.dtype != np.uint8:
+                mask_uint8 = np.where(roi_mask > 0, 1, 0).astype(np.uint8)
+            else:
+                mask_uint8 = roi_mask
+            mask_bool = mask_uint8.astype(bool)
         else:
             fallback_mask = np.zeros_like(trans_map, dtype=np.uint8)
             polygon = polygon_from_vanish_point(
@@ -310,6 +337,7 @@ class RoadVisibilityEstimator:
                 self.config.roi_expand,
             )
             cv2.fillConvexPoly(fallback_mask, np.array(polygon, dtype=np.int32), 1)
+            mask_uint8 = fallback_mask
             mask_bool = fallback_mask.astype(bool)
 
         values = trans_map[mask_bool]
@@ -337,7 +365,7 @@ class RoadVisibilityEstimator:
         mean = float(np.mean(values)) if values.size else 0.0
         visibility, percentile_value = self._compute_transmittance_visibility(
             trans_map,
-            roi_mask,
+            mask_uint8,
             vanish_point_row,
             lambda_value,
         )
@@ -353,14 +381,55 @@ class RoadVisibilityEstimator:
             raise ValueError("Estimator not initialised with a clear reference frame.")
         frame_float = frame.astype(np.float32)
         dark_fog = self._dark_channel(frame_float)
-        ratio = dark_fog / (self.reference_dark_channel + 1e-6)
-        ratio = np.clip(ratio, 0.0, 1.0)
+
+        reference_dc = self.reference_dark_channel
+        ratio_reference = np.minimum(dark_fog, reference_dc) / (reference_dc + 1e-6)
+        ratio_reference = np.clip(ratio_reference, 0.0, 1.0)
+
+        atmosphere = self._estimate_atmospheric_light(frame_float, dark_fog)
+        atmosphere = np.maximum(atmosphere.astype(np.float32), 1.0)
+        norm = frame_float / (atmosphere.reshape(1, 1, 3) + 1e-6)
+        ratio_atmosphere = np.min(norm, axis=2)
+        ratio_atmosphere = np.clip(ratio_atmosphere, 0.0, 1.0)
+
+        ratio = np.minimum(ratio_reference, ratio_atmosphere)
+
         trans_map = 1.0 - self.config.transmittance_dcp_omega * ratio
-        trans_map = np.clip(trans_map, 0.0, 1.0)
+        trans_map = np.clip(trans_map, 0.0, 1.0).astype(np.float32)
+
         sigma = max(self.config.transmittance_gaussian_sigma, 0.0)
         if sigma > 1e-6:
             trans_map = cv2.GaussianBlur(trans_map, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+        low_frac = clamp(self.config.transmittance_contrast_low, 0.0, 1.0)
+        high_frac = clamp(self.config.transmittance_contrast_high, 0.0, 1.0)
+        if high_frac <= low_frac:
+            high_frac = min(1.0, low_frac + 1e-3)
+        if trans_map.size > 0 and high_frac > low_frac:
+            low_val = float(np.percentile(trans_map, low_frac * 100.0))
+            high_val = float(np.percentile(trans_map, high_frac * 100.0))
+            if high_val > low_val + 1e-6:
+                normalized = (trans_map - low_val) / (high_val - low_val)
+                normalized = np.clip(normalized, 0.0, 1.0)
+                blend = clamp(self.config.transmittance_contrast_blend, 0.0, 1.0)
+                trans_map = (1.0 - blend) * trans_map + blend * normalized
+
+        gamma = max(self.config.transmittance_gamma, 1e-3)
+        if abs(gamma - 1.0) > 1e-6:
+            trans_map = np.power(trans_map, gamma)
         return trans_map
+
+    def _estimate_atmospheric_light(self, frame: np.ndarray, dark_channel: np.ndarray) -> np.ndarray:
+        percent = clamp(self.config.transmittance_atmosphere_top_percent, 0.0, 1.0)
+        if percent <= 0.0:
+            percent = 1e-3
+        flat_dark = dark_channel.reshape(-1)
+        pixel_count = flat_dark.size
+        sample_count = max(1, int(round(pixel_count * percent)))
+        indices = np.argpartition(flat_dark, -sample_count)[-sample_count:]
+        frame_flat = frame.reshape(-1, frame.shape[2])
+        atmosphere = frame_flat[indices].max(axis=0)
+        return atmosphere
 
     def _compute_transmittance_visibility(
         self,
@@ -390,12 +459,36 @@ class RoadVisibilityEstimator:
         valid_rows = row_counts > 0
         row_means[valid_rows] = row_sums[valid_rows] / (row_counts[valid_rows] + 1e-6)
 
-        threshold_scaled = pixel_percentile_value * clamp(self.config.transmittance_row_threshold_scale, 0.0, 1.0)
-        row_threshold = threshold_scaled
-        if np.any(valid_rows):
-            row_threshold_means = float(np.percentile(row_means[valid_rows], percentile))
-            row_threshold = min(row_threshold_means, threshold_scaled)
-        row_threshold = float(np.clip(row_threshold, 0.0, 1.0))
+        valid_indices = np.where(valid_rows)[0]
+        if valid_indices.size == 0:
+            return None, None
+        base_fraction = clamp(self.config.transmittance_row_base_fraction, 0.0, 1.0)
+        base_fraction = max(base_fraction, 1e-3)
+        base_count = int(np.ceil(valid_indices.size * base_fraction))
+        base_count = max(base_count, 1)
+        base_slice = valid_indices[:base_count]
+        base_mean = float(np.mean(row_means[base_slice]))
+
+        threshold_weight = clamp(self.config.transmittance_row_threshold_scale, 0.0, 1.0)
+        row_threshold_means = float(np.percentile(row_means[valid_rows], percentile))
+        row_max = float(np.max(row_means[valid_rows]))
+
+        target_threshold = pixel_percentile_value + (row_threshold_means - pixel_percentile_value) * threshold_weight
+        lower_bound = min(pixel_percentile_value, row_max)
+        upper_bound = max(pixel_percentile_value, row_max)
+        if row_max >= lower_bound:
+            target_threshold = float(np.clip(target_threshold, lower_bound, row_max))
+        else:
+            target_threshold = float(np.clip(target_threshold, row_max, upper_bound))
+
+        if target_threshold <= base_mean + 1e-6:
+            row_threshold = float(np.clip(target_threshold, 0.0, 1.0))
+        else:
+            progress = clamp(self.config.transmittance_row_threshold_blend, 0.0, 1.0)
+            row_threshold = base_mean + (target_threshold - base_mean) * progress
+            row_threshold = max(row_threshold, base_mean)
+            row_threshold = min(row_threshold, target_threshold)
+            row_threshold = float(np.clip(row_threshold, 0.0, 1.0))
 
         row_mask = row_means >= row_threshold
         candidate_rows = np.where(row_mask)[0]
@@ -438,7 +531,6 @@ class RoadVisibilityEstimator:
 
         fused = trim_mean(lambdas, self.config.lambda_trim_fraction)
         if np.isfinite(fused):
-            self.vehicle_lambda_history.append(float(fused))
             return float(fused)
         return None
 
@@ -475,69 +567,49 @@ class RoadVisibilityEstimator:
         return None
 
     def _fuse_lambda(self, lambda_lane: Optional[float], lambda_vehicle: Optional[float]) -> float:
-        # Establish baseline from clear reference if needed
         if self.reference_lambda is None:
             base = None
             if lambda_lane is not None and np.isfinite(lambda_lane):
                 base = float(lambda_lane)
-            elif self.vehicle_lambda_history:
-                base = float(np.mean(self.vehicle_lambda_history))
             elif lambda_vehicle is not None and np.isfinite(lambda_vehicle):
                 base = float(lambda_vehicle)
-                self.vehicle_lambda_history.append(base)
             if base is None:
                 base = self.config.default_lambda
             self.reference_lambda = base
-            self.lane_lambda_smooth = base
+            self.reference_lambda_base = base
             self.locked_lambda = base
             self.last_lambda_candidate = base
             return base
 
-        # Update lane-based smoothing
-        if lambda_lane is not None and np.isfinite(lambda_lane):
-            current = self.lane_lambda_smooth if self.lane_lambda_smooth is not None else self.reference_lambda
-            alpha = clamp(self.config.lambda_lane_smoothing_alpha, 0.0, 1.0)
-            self.lane_lambda_smooth = (1.0 - alpha) * float(current) + alpha * float(lambda_lane)
+        base = self.reference_lambda_base if self.reference_lambda_base is not None else self.reference_lambda
+        current = self.locked_lambda if self.locked_lambda is not None else self.reference_lambda
+        current = float(current)
 
-        lane_value = self.lane_lambda_smooth if self.lane_lambda_smooth is not None else self.reference_lambda
-        lane_value = float(lane_value)
+        candidate: Optional[float] = None
+        if lambda_vehicle is not None and np.isfinite(lambda_vehicle):
+            candidate = float(lambda_vehicle)
+            max_dev = max(self.config.lambda_vehicle_max_deviation, 0.0)
+            lower = base * (1.0 - max_dev)
+            upper = base * (1.0 + max_dev)
+            candidate = float(np.clip(candidate, lower, upper))
+            alpha = clamp(self.config.lambda_vehicle_update_alpha, 0.0, 1.0)
+            current = (1.0 - alpha) * current + alpha * candidate
+            current = float(np.clip(current, lower, upper))
 
-        # Vehicle contribution grows with history size
-        vehicle_weight = 0.0
-        vehicle_mean: Optional[float] = None
-        if self.vehicle_lambda_history:
-            vehicle_mean = float(np.mean(self.vehicle_lambda_history))
-            growth = max(self.config.lambda_vehicle_weight_growth, 0.0)
-            max_weight = clamp(self.config.lambda_vehicle_weight_max, 0.0, 1.0)
-            vehicle_weight = min(len(self.vehicle_lambda_history) * growth, max_weight)
-
-        fused = lane_value
-        if vehicle_mean is not None and vehicle_weight > 0.0:
-            fused = (1.0 - vehicle_weight) * lane_value + vehicle_weight * vehicle_mean
-
-        # Clamp to avoid drastic swings
-        min_ratio = max(self.config.lambda_min_ratio, 0.0)
-        max_ratio = max(self.config.lambda_max_ratio, min_ratio + 1e-3)
-        fused = max(lane_value * min_ratio, min(fused, lane_value * max_ratio))
-
-        self.reference_lambda = lane_value
-        self.locked_lambda = fused
-        self.last_lambda_candidate = fused
+        self.reference_lambda = current
+        self.locked_lambda = current
+        self.last_lambda_candidate = candidate
         self.lambda_outlier_count = 0
-        return fused
+        return current
 
     def _visibility_from_vehicles(
         self,
         lambda_value: float,
         vehicle_boxes: Sequence[BoundingBox],
         vanish_point_row: float,
-    ) -> float:
+    ) -> Optional[float]:
         if not vehicle_boxes:
-            if self.queue_detect:
-                return float(min(self.queue_detect))
-            if self.last_vehicle_visibility is not None:
-                return float(self.last_vehicle_visibility)
-            return self.config.default_visibility_when_empty
+            return None
 
         sorted_boxes = sorted(vehicle_boxes, key=lambda b: b.top())
         top_row = sorted_boxes[0].top()
@@ -546,9 +618,8 @@ class RoadVisibilityEstimator:
         filtered_top = min(self.vehicle_upboard_history) if self.vehicle_upboard_history else top_row
 
         distance = lambda_value / max(filtered_top - vanish_point_row + 0.1, 0.1)
-        self.queue_detect.append(distance)
         self.last_vehicle_visibility = distance
-        return float(min(self.queue_detect))
+        return float(distance)
 
     def _visibility_from_edges(
         self,
@@ -559,13 +630,14 @@ class RoadVisibilityEstimator:
         roi_mask: Optional[np.ndarray],
     ) -> Tuple[float, Optional[np.ndarray]]:
         reference = self.background.get_reference()
+        self.last_compare_row = None
         if roi_mask is not None and roi_mask.shape == edges.shape:
             if roi_mask.dtype == np.uint8:
-                mask = roi_mask.copy()
+                base_mask = roi_mask.copy()
             else:
-                mask = np.where(roi_mask > 0, 255, 0).astype(np.uint8)
+                base_mask = np.where(roi_mask > 0, 255, 0).astype(np.uint8)
         else:
-            mask = np.zeros_like(edges, dtype=np.uint8)
+            base_mask = np.zeros_like(edges, dtype=np.uint8)
             polygon = polygon_from_vanish_point(
                 frame.shape[1],
                 frame.shape[0],
@@ -574,25 +646,28 @@ class RoadVisibilityEstimator:
                 self.config.roi_bottom_ratio,
                 self.config.roi_expand,
             )
-            cv2.fillConvexPoly(mask, np.array(polygon, dtype=np.int32), 255)
-
+            cv2.fillConvexPoly(base_mask, np.array(polygon, dtype=np.int32), 255)
+        # if roi_mask is not None:
+            # cv2.imwrite("1_mask.png",roi_mask)
         if reference is None:
             fallback_delta = max(10.0, frame.shape[0] * 0.5 - vanish_point_row)
             distance = lambda_value / (0.1 + fallback_delta)
             self.queue_compare.append(distance)
-            return float(min(self.queue_compare)), mask
+            return float(min(self.queue_compare)), base_mask
 
         expand_ratio = max(self.config.vis_compare_roi_expand_ratio, 0.0)
+        working_mask = base_mask
         if expand_ratio > 1e-6:
+            working_mask = base_mask.copy()
             kernel_size = int(max(frame.shape[0], frame.shape[1]) * expand_ratio)
             kernel_size = max(3, kernel_size)
             if kernel_size % 2 == 0:
                 kernel_size += 1
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-            mask = cv2.dilate(mask, kernel, iterations=1)
+            working_mask = cv2.dilate(working_mask, kernel, iterations=1)
 
-        edges_masked = cv2.bitwise_and(edges, mask)
-        reference_masked = cv2.bitwise_and(reference, mask)
+        edges_masked = cv2.bitwise_and(edges, working_mask)
+        reference_masked = cv2.bitwise_and(reference, working_mask)
 
         edges_processed = dilate_erode(edges_masked, self.config.morph_kernel_size)
         reference_processed = dilate_erode(reference_masked, self.config.morph_kernel_size)
@@ -623,10 +698,106 @@ class RoadVisibilityEstimator:
 
         if first_visible < 0:
             first_visible = edges.shape[0] - 1
+        min_row = int(
+            max(
+                vanish_point_row + self.config.edge_visibility_min_delta_rows,
+                row_start,
+            )
+        )
+        min_row = min(min_row, edges.shape[0] - 1)
+        if first_visible < min_row:
+            first_visible = min_row
 
+        self.last_compare_row = float(first_visible)
         distance = distance_from_row(lambda_value, vanish_point_row, first_visible)
+        distance = min(distance, self.config.visibility_compare_max_distance)
         self.queue_compare.append(distance)
-        return float(min(self.queue_compare)), mask
+        return float(min(self.queue_compare)), base_mask
+
+    def _update_vehicle_upper_bound(self, detection: Optional[float]) -> Optional[float]:
+        if detection is not None and detection > 0.0:
+            detection_clamped = max(detection, self.config.visibility_min_distance)
+            self.vehicle_detect_history.append(float(detection_clamped))
+            if self.vehicle_detect_history:
+                self.vehicle_upper_bound = float(min(self.vehicle_detect_history))
+            self.vehicle_upper_bound_missing = 0
+        else:
+            self.vehicle_detect_history.clear()
+            self.vehicle_upper_bound_missing += 1
+            if self.vehicle_upper_bound is not None:
+                relax = max(self.config.vehicle_upper_bound_relax, 1.0)
+                self.vehicle_upper_bound *= relax
+                max_missing = max(int(self.config.vehicle_upper_bound_window), 1)
+                if self.vehicle_upper_bound_missing >= max_missing:
+                    self.vehicle_upper_bound = None
+
+        if self.vehicle_upper_bound is not None:
+            self.vehicle_upper_bound = float(
+                max(
+                    self.config.visibility_min_distance,
+                    min(self.vehicle_upper_bound, self.config.visibility_compare_max_distance),
+                )
+            )
+        return self.vehicle_upper_bound
+
+    def _compute_fused_visibility(
+        self,
+        visibility_compare: float,
+        visibility_trans: Optional[float],
+        visibility_detect: Optional[float],
+    ) -> float:
+        if self._suppress_fusion_update:
+            return max(float(visibility_compare), self.config.visibility_min_distance)
+
+        min_distance = max(self.config.visibility_min_distance, 0.0)
+        compare_value = max(float(visibility_compare), min_distance)
+        alpha_compare = clamp(self.config.visibility_fusion_alpha_compare, 0.0, 1.0)
+        if self.smoothed_compare is None:
+            self.smoothed_compare = compare_value
+        else:
+            self.smoothed_compare = (1.0 - alpha_compare) * self.smoothed_compare + alpha_compare * compare_value
+
+        trans_input: Optional[float] = None
+        if visibility_trans is not None:
+            trans_value = max(float(visibility_trans), min_distance)
+            alpha_trans = clamp(self.config.visibility_fusion_alpha_trans, 0.0, 1.0)
+            if self.smoothed_trans is None:
+                self.smoothed_trans = trans_value
+            else:
+                self.smoothed_trans = (1.0 - alpha_trans) * self.smoothed_trans + alpha_trans * trans_value
+        if self.smoothed_trans is not None:
+            trans_input = self.smoothed_trans
+
+        weight_compare = max(self.config.visibility_compare_weight, 0.0)
+        weight_trans = max(self.config.visibility_trans_weight, 0.0)
+        fused_raw = self.smoothed_compare if self.smoothed_compare is not None else compare_value
+        if trans_input is not None and weight_trans > 0.0:
+            total_weight = weight_compare + weight_trans
+            if total_weight > 1e-6:
+                fused_raw = (weight_compare * self.smoothed_compare + weight_trans * trans_input) / total_weight
+            else:
+                fused_raw = trans_input
+        elif weight_compare <= 0.0 and trans_input is not None:
+            fused_raw = trans_input
+
+        fused_raw = max(fused_raw, min_distance)
+        fused_raw = min(fused_raw, self.config.visibility_compare_max_distance)
+
+        upper_bound = self._update_vehicle_upper_bound(visibility_detect)
+        if upper_bound is not None:
+            fused_raw = min(fused_raw, upper_bound)
+            fused_raw = max(fused_raw, min_distance)
+
+        alpha_final = clamp(self.config.visibility_fusion_alpha_final, 0.0, 1.0)
+        if self.fused_visibility is None:
+            self.fused_visibility = fused_raw
+        else:
+            self.fused_visibility = (1.0 - alpha_final) * self.fused_visibility + alpha_final * fused_raw
+
+        self.fused_visibility = float(
+            max(min_distance, min(self.fused_visibility, self.config.visibility_compare_max_distance))
+        )
+        return self.fused_visibility
 
     def _update_vehicle_history(self, vehicle_boxes: Sequence[BoundingBox], frame_width: int) -> None:
         if self.vehicle_column_history is None or self.vehicle_column_history.shape[0] != frame_width:

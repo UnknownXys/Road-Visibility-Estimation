@@ -39,7 +39,7 @@ class VisibilityEstimate:
     lambda_from_lane: Optional[float]
     lambda_from_vehicle: Optional[float]
     lambda_fused: float
-    visibility_detect: float
+    visibility_detect: Optional[float]
     visibility_compare: float
     roi_mask: Optional[np.ndarray] = None
     lane_segments: List[LaneSegment] = field(default_factory=list)
@@ -49,6 +49,7 @@ class VisibilityEstimate:
     transmittance_bins: Optional[np.ndarray] = None
     visibility_transmittance: Optional[float] = None
     transmittance_percentile_value: Optional[float] = None
+    visibility_fused: Optional[float] = None
 
 
 @dataclass

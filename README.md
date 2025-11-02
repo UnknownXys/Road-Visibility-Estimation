@@ -1,189 +1,121 @@
-# Road Visibility Estimation (Python)
+# Road Visibility Estimation
 
-This project re-implements the visibility estimation logic from `src/visibility_detect.cpp` in Python. It follows the same high-level workflow:
 
-1. Detect the road vanishing point.
-2. Detect roadway dashed lane segments and measure their image-space length.
-3. Calibrate the camera distance parameter `lambda` using the known physical lane segment length (6 m).
-4. Optionally, estimate an alternative `lambda` from lightweight vehicle detections assuming a 4 m vehicle length.
-5. Compare current foggy-scene edges with clear-day reference edges to compute `caculate_vis_compare`.
-6. Use the furthest visible vehicle detection to compute `caculate_vis_detect`.
+## Key Features
 
-## Visibility estimation flowchart / 流程图
+- **Hybrid λ calibration** - lane geometry (dashed line) with optional vehicle-length prior.  
+- **Edge-based visibility (`vis_compare`)** - compares the current Canny edge map to a clear-scene background model using a sliding retention window.  
+- **Transmittance-based visibility (`vis_trans`)** - estimates per-row transmittance via a dark-channel-style ratio, normalised by the clear reference.  
+- **Vehicle distance upper bound (`vis_detect`)** - uses the nearest detected vehicle, when available, as a hard cap on visibility.  
+- **Fused visibility output (`vis_fused`)** - weighted blend of the smoothed compare/trans signals with the optional vehicle upper bound.  
+- Lightweight plotting & debugging tools.
 
-```
-输入帧
-  |
-  v
-LaneBoundaryDetector -> 道路 ROI + 灭点锁定
-  |
-  v
-车辆历史 -> ROI 扩展
-  |
-  v
-HybridLaneDetector -> 车道虚线段
-  |
-  v
-λ 候选
-  |- 虚线段 λ_lane
-  |- 车辆 λ_vehicle
-        |
-        v
-      λ 锁定与融合同步更新 last_lambda_candidate
-        |
-        v
-    +-----------------------+----------------------------+
-    | visibility_detect     | visibility_compare         |
-    | 车辆上沿 -> 距离估计    | Canny 边缘 -> 背景对比       |
-    | 最小值队列滤波         | 滑窗保持率 -> 最小值队列      |
-    +-----------------------+----------------------------+
-                        |
-                        v
-      compute_transmittance_metrics (可选) -> visibility_trans
-                        |
-                        v
-            VisibilityEstimate 输出 (λ_fused, 各类距离, ROI)
-```
-
-## Project layout
+## Repository Layout
 
 ```
 python_visibility/
-  README.md
-  pyproject.toml
   road_visibility/
-    __init__.py
-    background.py
-    camera_model.py
-    config.py
-    types.py
-    utils.py
-    visualization.py
-    detectors/
-      __init__.py
-      base.py
-      lane_markings.py
-      lane_segmentation.py
-      hybrid_lane.py
-      vanishing_point.py
-      vehicles.py
+    config.py                 # PipelineConfig knobs (weights, smoothing, vehicle upper bound, etc.)
+    visibility.py             # RoadVisibilityEstimator core logic
+    visualization.py          # Drawing helpers for overlays
+    types.py                  # Dataclasses (VisibilityEstimate now carries visibility_fused)
+    detectors/                # Lane, boundary, vehicle detectors
   scripts/
     estimate_visibility.py
     estimate_visibility_video.py
-    test_lane_vp.py
   tools/
-    check_segments.py
-    debug_dash_density.py
-    debug_dash_filters.py
-    debug_lines.py
-    debug_roi_visuals.py
-    export_visibility_series.py
-    inspect_lsd.py
-    process_dash.py
-    process_video_segment.py
-    render_detection_overlay.py
+    debug_visibility_single.py
     render_single_frame.py
+    export_visibility_series.py
+
 ```
-
-### Utility scripts
-
-All auxiliary debug and export helpers now live in `tools/`. Invoke them explicitly, for example:
-
-```bash
-python tools/render_detection_overlay.py --help
-```
-
-If you had local aliases or automation pointing at the previous `scripts/` paths, update them to reference `tools/` instead.
 
 ## Installation
 
 ```bash
 python -m venv .venv
-. .venv/Scripts/activate          # Windows (PowerShell)
+# PowerShell:
+. .venv/Scripts/Activate.ps1
 pip install -e .
-```
-
-Add the optional Ultralytics YOLO dependency if you need automatic vehicle-based lambda estimation:
-
-```bash
+# Optional YOLO support:
 pip install -e .[yolo]
 ```
 
-## Usage
+## Quick Start
 
-The end-to-end estimator is exposed via the `RoadVisibilityEstimator` class:
-
-```python
-import cv2
-from road_visibility.visibility import RoadVisibilityEstimator
-from road_visibility.config import PipelineConfig
-
-estimator = RoadVisibilityEstimator(PipelineConfig())
-
-# Warm-up with a clear day frame (or a short sequence) to learn background edges.
-clear_frame = cv2.imread("data/clear_frame.jpg")
-estimator.initialize(clear_frame)
-
-# Estimate visibility on a foggy frame.
-fog_frame = cv2.imread("data/fog_frame.jpg")
-result = estimator.estimate(fog_frame)
-
-print(result.lambda_from_lane)     # camera distance parameter
-print(result.visibility_compare)   # edge-based visibility
-print(result.visibility_detect)    # vehicle-based visibility
-```
-
-Run the demo script for a self-contained example:
-
-```bash
-python scripts/estimate_visibility.py --clear data/clear.jpg --fog data/fog.jpg
-```
-
-### Optional lane segmentation model
-
-The pipeline can fuse a lightweight lane-segmentation network with the geometric lane detector. Provide an ONNX model via the demo script:
+### Estimate visibility for a single frame
 
 ```bash
 python scripts/estimate_visibility.py \
-    --clear data/clear.jpg \
-    --fog data/fog.jpg \
-    --lane-model checkpoints/lane.onnx \
-    --lane-input-size 640x360
+  --clear  data/clear_frame.jpg \
+  --fog    data/foggy_frame.jpg
 ```
 
-If the ONNX file or `onnxruntime` is unavailable, the estimator automatically falls back to the handcrafted detector, so you can iterate incrementally.
+Example output:
 
-### Lane & vanishing-point visualisation
-
-Use the dedicated tester to inspect lane-dash detections and the inferred vanishing point:
-
-```bash
-# Annotate a single image
-python scripts/test_lane_vp.py --image path/to/frame.jpg --output-dir debug/lane_check
-
-# Sample frames from a video (saves annotated JPEGs)
-python scripts/test_lane_vp.py --video data/drive.mp4 --sample-stride 180 --max-samples 12 \
-    --output-dir debug/video_check
+```
+[info] Initializing with clear frame...
+  Vanish point: (168.5, 102.7)
+[info] Estimating visibility on foggy frame...
+  Visibility (edge compare): 206.2 m
+  Visibility (transmittance): 98.9 m
+  Visibility (fused): 174.0 m
 ```
 
-## Video pipeline
-
-When you have only a video, treat the first 20 % of frames as clear-scene input. The video interface automatically averages those frames to build the background model, with an option to inject an external clear image:
+### Process an entire video
 
 ```bash
 python scripts/estimate_visibility_video.py \
-    --video data/drive.mp4 \
-    --warmup-fraction 0.25 \
-    --frame-stride 5 \
-    --use-yolo \
-    --lane-model checkpoints/lane.onnx
+  --video test.mp4 \
+  --clear-image data/clear_frame.jpg \
+  --frame-stride 10
 ```
 
-Add `--clear-image path/to/clear.jpg` if you want to override the automatically generated reference.
+The console progress line now includes the fused value:
 
-## Notes
+```
+[frame 00089] t=  2.97s vis_compare= 273.1m vis_trans= 112.1m fused= 174.0m
+```
 
-- The vanishing point and lane-marking detection rely on image processing heuristics; tune `PipelineConfig` for your scene.
-- If you have multiple clear-day frames, pass them to `initialize` sequentially to stabilise the background edge model.
-- Vehicle detection uses an optional plugin system; register your own detector by subclassing `BaseVehicleDetector`.
-- The output distances are in metres, assuming the provided physical dimensions (6 m lane segment, 4 m vehicle length).
+If `--clear-image` is omitted, the processor averages the first 60 seconds of footage to build the warm-up reference (override with `--warmup-fraction` if needed).
+
+### Explore ROI and transmittance
+
+```bash
+python tools/debug_visibility_single.py \
+  --clear clear_ref.png \
+  --image t1.png \
+  --save-trans-map debug/t1_trans_map.png
+```
+
+The script prints `vis_compare`, `vis_trans`, `vis_detect`, and the final `vis_fused`, and writes an overlay with compare/trans rows.
+
+### Export frame-wise CSV
+
+```bash
+python tools/export_visibility_series.py \
+  --video test.mp4 \
+  --clear-image data/clear_frame.jpg \
+  --output-dir results
+```
+
+CSV columns now include `visibility_fused_m` in addition to the legacy compare/detect metrics.
+
+## Fusion Configuration Highlights
+
+Tune `PipelineConfig` to match your scene:
+
+| Field | Description |
+| --- | --- |
+| `visibility_compare_weight`, `visibility_trans_weight` | Blend weights between edge- and trans-based estimates. |
+| `visibility_fusion_alpha_compare`, `visibility_fusion_alpha_trans`, `visibility_fusion_alpha_final` | EMA smoothing factors (set to 1.0 for raw values). |
+| `visibility_min_distance` | Floor applied to every visibility signal before fusion. |
+| `vehicle_upper_bound_window`, `vehicle_upper_bound_relax` | Controls how long the vehicle-derived upper bound is kept when detections disappear. |
+
+All fusion parameters live in `road_visibility/config.py` and can be overridden when constructing `PipelineConfig`.
+
+## Developer Notes
+
+- `VisibilityEstimate.visibility_detect` is now `Optional[float]`; scripts and tools were updated to accept the `None` case.  
+- The fused output is available as `VisibilityEstimate.visibility_fused`.  
+- Vehicle-based visibility is treated strictly as an upper bound—no default fallback when detections are missing.  

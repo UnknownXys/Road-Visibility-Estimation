@@ -79,11 +79,22 @@ def annotate_visibility(
         color=vanish_color,
     )
 
+    detect_text = (
+        f"{estimate.visibility_detect:.1f}m"
+        if estimate.visibility_detect is not None
+        else "n/a"
+    )
+    fused_text = (
+        f"{estimate.visibility_fused:.1f}m"
+        if estimate.visibility_fused is not None
+        else "n/a"
+    )
     text = (
         f"vp=({estimate.vanish_point_col:.1f},{estimate.vanish_point_row:.1f}) "
         f"lambda={estimate.lambda_fused:.0f} "
         f"vis_edge={estimate.visibility_compare:.1f}m "
-        f"vis_vehicle={estimate.visibility_detect:.1f}m"
+        f"vis_vehicle={detect_text} "
+        f"vis_fused={fused_text}"
     )
     cv2.putText(
         annotated,

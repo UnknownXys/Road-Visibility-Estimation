@@ -15,9 +15,9 @@ from .utils import ensure_directory
 @dataclass
 class VideoVisibilityProcessor:
     estimator: RoadVisibilityEstimator
-    warmup_fraction: float = 0.2
+    warmup_fraction: float = 0.0
     frame_stride: int = 1
-    save_clear_scene: bool = True
+    save_clear_scene: bool = False
     _last_clear_scene_ts: float = field(default=float("-inf"), init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -50,8 +50,13 @@ class VideoVisibilityProcessor:
         warmup_count = 0
 
         if clear_image_path is None:
-            warmup_count = int(total_frames * self.warmup_fraction) if total_frames > 0 else 0
+            if self.warmup_fraction > 0.0 and total_frames > 0:
+                warmup_count = int(total_frames * self.warmup_fraction)
+            else:
+                warmup_count = int(round(fps * 60.0))
             warmup_count = max(warmup_count, 1)
+            if total_frames > 0:
+                warmup_count = min(warmup_count, total_frames)
 
             for _ in range(warmup_count):
                 ret, frame = cap.read()
@@ -64,6 +69,7 @@ class VideoVisibilityProcessor:
                     accum = frame_float
                 else:
                     accum += frame_float
+            warmup_count = len(warmup_frames)
 
         if clear_image_path:
             clear_frame = cv2.imread(clear_image_path)
