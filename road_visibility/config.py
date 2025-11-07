@@ -80,7 +80,7 @@ class PipelineConfig:
     background_alpha: float = 1.0 / 30.0
     queue_size: int = 60
     vanish_point_offset_limit: int = 150
-    default_lambda: float = 20000.0
+    default_lambda: float = 8000.0
     visibility_compare_max_distance: float = 1200.0
     roi_bottom_ratio: float = 0.98
     roi_top_ratio: float = 0.35
