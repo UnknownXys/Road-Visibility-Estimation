@@ -25,7 +25,7 @@ def polygon_from_vanish_point(
     bottom_ratio: float,
     expand_px: int,
 ) -> List[Tuple[int, int]]:
-    top_y = int(clamp(vanish_point_row, 0, height - 1))
+    top_y = int(vanish_point_row)
     bottom_y = int(clamp(height * bottom_ratio, top_y + 1, height - 1))
     top_width = int(width * top_ratio)
     half_top = top_width // 2
