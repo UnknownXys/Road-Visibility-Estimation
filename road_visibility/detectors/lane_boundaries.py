@@ -86,19 +86,41 @@ class LaneBoundaryDetector:
             if right_line is None and right_points:
                 right_line = self._fit_boundary(right_points, right_slope, angle_epsilon=relaxed_angle_epsilon)
 
+        # Fallback
+        if left_line is None or right_line is None:
+            if candidates:
+                candidates_sorted = sorted(candidates, key=lambda c: c[1][0])
+                
+                if left_line is None and len(candidates_sorted) > 0:
+                    left_candidate = candidates_sorted[0]
+                    left_top, left_bottom, _, _ = left_candidate
+                    left_slope = (left_bottom[0] - left_top[0]) / max(left_bottom[1] - left_top[1], 1e-6)
+                    y0 = (left_top[1] + left_bottom[1]) / 2.0
+                    x0 = left_top[0] + left_slope * (y0 - left_top[1])
+                    norm = np.hypot(left_slope, 1.0)
+                    left_line = BoundaryLine(left_slope / norm, 1.0 / norm, x0, y0)
+                
+                if right_line is None and len(candidates_sorted) > 0:
+                    right_candidate = candidates_sorted[-1]  
+                    right_top, right_bottom, _, _ = right_candidate
+                    right_slope = (right_bottom[0] - right_top[0]) / max(right_bottom[1] - right_top[1], 1e-6)
+                    y0 = (right_top[1] + right_bottom[1]) / 2.0
+                    x0 = right_top[0] + right_slope * (y0 - right_top[1])
+                    norm = np.hypot(right_slope, 1.0)
+                    right_line = BoundaryLine(right_slope / norm, 1.0 / norm, x0, y0)
         vanish: Optional[Tuple[float, float]] = None
         roi_mask: Optional[np.ndarray] = None
 
         if left_line and right_line:
             intersection = self._intersect_lines(left_line, right_line)
-            if intersection is not None and 0.0 <= intersection[1] <= height * 1.5:
-                vanish = intersection
-            else:
-                left_at_row = left_line.x_at(approx_vanish_row)
-                right_at_row = right_line.x_at(approx_vanish_row)
-                if left_at_row is not None and right_at_row is not None:
-                    vanish_x = (left_at_row + right_at_row) * 0.5
-                    vanish = (vanish_x, float(approx_vanish_row))
+            # if intersection is not None and 0.0 <= intersection[1] <= height * 1.5:
+            vanish = intersection
+            # else:
+            #     left_at_row = left_line.x_at(approx_vanish_row)
+            #     right_at_row = right_line.x_at(approx_vanish_row)
+            #     if left_at_row is not None and right_at_row is not None:
+            #         vanish_x = (left_at_row + right_at_row) * 0.5
+            #         vanish = (vanish_x, float(approx_vanish_row))
             roi_mask = self._build_roi_mask(
                 height,
                 width,
