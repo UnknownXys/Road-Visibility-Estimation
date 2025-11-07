@@ -79,6 +79,13 @@ class LaneBoundaryDetector:
         left_line = self._fit_boundary(left_points, left_slope)
         right_line = self._fit_boundary(right_points, right_slope)
 
+        if (left_line is None) ^ (right_line is None):
+            relaxed_angle_epsilon = 20.0  # disable angle filter in fallback to recover the missing side
+            if left_line is None and left_points:
+                left_line = self._fit_boundary(left_points, left_slope, angle_epsilon=relaxed_angle_epsilon)
+            if right_line is None and right_points:
+                right_line = self._fit_boundary(right_points, right_slope, angle_epsilon=relaxed_angle_epsilon)
+
         vanish: Optional[Tuple[float, float]] = None
         roi_mask: Optional[np.ndarray] = None
 
@@ -208,6 +215,7 @@ class LaneBoundaryDetector:
         self,
         points: List[Tuple[Tuple[float, float], float]],
         slope_hint: Optional[float],
+        angle_epsilon: Optional[float] = None,
     ) -> Optional[BoundaryLine]:
         if len(points) < 4:
             return None
@@ -250,8 +258,12 @@ class LaneBoundaryDetector:
         x0 = float(slope_final * y0 + intercept_final)
 
         angle = abs(np.degrees(np.arctan2(vy, vx)))
-        if angle < self.config.boundary_angle_epsilon or angle > 170 - self.config.boundary_angle_epsilon:
-            return None
+        if angle_epsilon is None:
+            angle_epsilon = self.config.boundary_angle_epsilon
+        if angle_epsilon is not None and angle_epsilon >= 0.0:
+            upper_limit = 170.0 - angle_epsilon
+            if angle < angle_epsilon or angle > upper_limit:
+                return None
 
         return BoundaryLine(float(vx), float(vy), x0, y0)
 
